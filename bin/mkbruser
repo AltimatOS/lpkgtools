@@ -1,0 +1,21 @@
+#!/bin/bash
+
+if [[ $UID != 0 ]]; then
+    echo "Cannot run as non-root user"
+    exit 1
+fi
+
+. /System/cfg/lpkgtools/configuration
+. /System/lib/lpkgtools/functions
+
+# create the user and group needed
+chkgrp $BUILDGROUP
+chkusr $BUILDUSER $BUILDGROUP
+set_passwd $BUILDUSER 'mi2h8u2!'
+
+# setting up sudo environent
+add_user_to_sudoers $BUILDUSER
+add_group_to_sudoers $BUILDGROUP
+
+# copy environment files into place
+setup_environment builder

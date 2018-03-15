@@ -1,0 +1,15 @@
+#!/bin/bash
+
+. /System/cfg/lpkgtools/configuration
+. /System/lib/lpkgtools/functions
+
+print_cyan "ENTERING BUILDROOT"
+echo
+chroot "$CHROOT" /tools/bin/env \
+       -i HOME=/Users/Administrator \
+       TERM="$TERM" PS1='\u:\w\$ ' \
+       PATH=/System/bin:/System/sbin:/tools/bin \
+       /System/bin/bash --login +h
+print_cyan "EXITING BUILDROOT"
+echo
+

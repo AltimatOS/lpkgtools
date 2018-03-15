@@ -1,0 +1,152 @@
+#!/bin/bash
+
+set -e
+
+. /System/cfg/lpkgtools/configuration
+. /System/lib/lpkgtools/functions
+
+# pull in the local user's configuration values
+if [[ -f ~/.apbrc ]]; then
+    . ~/.apbrc
+fi
+
+BP_FILE_NAME=""
+PHASE=""
+REBUILD=0
+CLEAN_BUILDDIR=0
+SKIP_DEPENDENCY_CHECKS=0
+SKIP_PREP=0
+SKIP_CONFIGURE=0
+SKIP_BUILD=0
+SKIP_CHECK=0
+SIGN_PKG=0
+
+function cleanup() {
+    rm $_PACKAGE_METADATA_TMPFILE
+    rm $_PACKAGE_TRIGGERS_TMPFILE
+    rm $_PACKAGE_SCRIPTLETS_TMPFILE
+    rm $_PACKAGE_FILE_LISTS_TMPFILE
+}
+
+function mkpkg_version() {
+    echo "mkpkg: $LPKG_NAME version $LPKG_VERSION"
+    echo "$LPKG_COPYRIGHT"
+    echo "Licensed under the $LPKG_LICENSE"
+    echo
+    echo "This is free software; you are permitted to change and redistribute it."
+    echo "There is NO WARRANTY, to the extent permitted by law."
+}
+
+function usage() {
+    mkpkg_version
+    echo
+    echo "Example:"
+    echo "mkpkg OPTIONS"
+    echo
+    echo "Required Options (At least one of these must be present):"
+    echo "  -bp BLUEPRINT      Build through begin_prep phase of the blueprint file."
+    echo "  -bc BLUEPRINT      Build through begin_configure phase of the blueprint file."
+    echo "  -bm BLUEPRINT      Build through begin_build phase of the blueprint file."
+    echo "  -bt BLUEPRINT      Build through begin_check phase of the blueprint file."
+    echo "  -bi BLUEPRINT      Build through begin_install phase of the blueprint file."
+    echo "  -bb BLUEPRINT      Generate a binary package from the blueprint file."
+    echo "  -bs BLUEPRINT      Generate a source package from the blueprint file."
+    echo "  -ba BLUEPRINT      Generate both binary and source packages from the"
+    echo "                     blueprint file."
+    echo " --rebuild SRCPKG    Build a binary package from a source package."
+    echo
+    echo "Common options:"
+    echo " --clean             Remove all files from the build tree."
+    echo " --nodeps            Do not verify build dependencies."
+    echo " --rmsources         Remove source files after build."
+    echo " --rmbp              Remove blueprint file after build."
+#    echo " --short-circuit     Skip specified phases. The selected phase should be either"
+#    echo "                     the configure, build, check, or installation phases of the"
+#    echo "                     build. This option must be AFTER flags for a build phase."
+    echo " --sign              Add a GPG signature to the package."
+    echo " --help|--usage      Show this help message."
+    echo " --version           Show the version of mkpkg."
+}
+
+# lets determine which step we want to run in the build
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -bp) PHASE="prep";;
+        -bc) PHASE="configure";;
+        -bm) PHASE="build";;
+        -bt) PHASE="check";;
+        -bi) PHASE="install";;
+        -bb) PHASE="gen_binary_pkg";;
+        -bs) PHASE="gen_source_pkg";;
+        -ba) PHASE="all";;
+        --rebuild) PHASE="gen_binary_pkg" && REBUILD=1;;
+        --clean)   CLEAN_BUILDDIR=1;;
+        --nodeps)  SKIP_DEPENDENCY_CHECKS=1;;
+        --rmsources) REMOVE_SOURCES=1;;
+        --rmbp)      REMOVE_BLUEPRINT=1;;
+#        --short-circuit)
+#            if [[ "$PHASE" == "configure" ]]; then
+#                SKIP_PREP=1
+#            elif [[ "$PHASE" == "build" ]]; then
+#                SKIP_PREP=1
+#                SKIP_CONFIGURE=1
+#            elif [[ "$PHASE" == "check" ]]; then
+#                SKIP_PREP=1
+#                SKIP_CONFIGURE=1
+#                SKIP_BUILD=1
+#            elif [[ "$PHASE" == "install" ]]; then
+#                SKIP_PREP=1
+#                SKIP_CONFIGURE=1
+#                SKIP_BUILD=1
+#                SKIP_CHECK=1
+#            else
+#                echo "Only Configure, Build, Check, and Install build phases are accepted with this option"
+#                exit
+#            fi
+#             ;;
+        --sign) SIGN_PKG=1;;
+        --help) usage && exit;;
+        --usage) usage && exit;;
+        --version) mkpkg_version && exit;;
+        *) if [[ -f $1 ]]; then
+               BP_FILE_NAME=$1
+           else
+               print_red "File not found. An LPKG blueprint filename is required!" && echo
+               usage
+               exit -1
+           fi
+    esac
+    shift
+done
+
+if [[ -z $PHASE ]]; then
+    usage && exit
+fi
+
+# source in the blueprint file
+. $BP_FILE_NAME
+
+declare -A _phases
+_phases=([gen_binary_pkg]=6 [gen_source_pkg]=7 [all]=8)
+
+BUILD_STAGE="gen_binary_pkg"
+echo
+print_white "PHASE: Generate Binary Package" && echo
+NUMBER_OF_PACKAGES=$(cat $_PACKAGE_METADATA_TMPFILE | grep -c "package")
+print_cyan "Found $NUMBER_OF_PACKAGES package defined in the blueprint file" && echo
+
+# for each package, generate a binary package
+for PKG in cat $_PACKAGE_METADATA_TMPFILE | grep "package"; do
+    # gather the info this package needs for metadata, etc.
+    
+# create pkg dir layout in hidden directory in the buildroot so we can process the pkg
+#mkdir $BUILDROOT
+done
+
+if [[ "${_phases[$PHASE]}" -eq "${_phases[$BUILD_STAGE]}" ]]; then
+    cleanup
+    exit
+fi
+
+cleanup
+exit

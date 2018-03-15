@@ -1,0 +1,795 @@
+LPKG_NAME="part of the Linux Software Installer (LSI) suite"
+LPKG_VERSION="0.1"
+LPKG_LICENSE="Apache License, version 2.0"
+LPKG_COPYRIGHT="Copyright (C) 2014-2018 YggdrasilSoft, LLC."
+
+shopt -s expand_aliases
+
+DEBUG=1
+if [[ "$DEBUG" -eq 1 ]]; then
+    set -x
+fi
+
+CONFIGURATION=/System/cfg/lpkgtools/configuration
+
+BUILD_STAGE=""
+
+PKGNAME=""
+PKGEPOCH=0
+VERSION=""
+BUILDNUM=""
+SRCFILE=""
+SRCDIR=""
+BUILDROOT=""
+
+# some internal variables...
+_PACKAGE_METADATA_TMPFILE=$(mktemp)
+_PACKAGE_TRIGGERS_TMPFILE=$(mktemp)
+_PACKAGE_SCRIPTLETS_TMPFILE=$(mktemp)
+_PACKAGE_FILE_LISTS_TMPFILE=$(mktemp)
+
+# aliases to allow me to hide the shell heritage of apb
+alias package_metadata="cat << 'end_package_metadata' >> $_PACKAGE_METADATA_TMPFILE"
+alias triggers="cat << 'end_triggers' >> $_PACKAGE_TRIGGERS_TMPFILE"
+alias scriptlets="cat << 'end_scriptlets' >> $_PACKAGE_SCRIPTLETS_TMPFILE"
+alias files="cat << 'end_files' >> $_PACKAGE_FILE_LISTS_TMPFILE"
+
+function print {
+    echo -n "$1"
+}
+
+function say {
+    echo "$1"
+}
+
+function center() {
+    COLS=`tput cols`
+    if [[ "${#1}" -lt $COLS ]]; then
+        width=$(( $COLS - ${#1} ))
+        echo -en "\\033[1;37m"
+        printf "%${width}s\n" "$1"
+        echo -e "\\033[0;39m"
+    else
+        echo "$1"
+    fi
+}
+
+SET_NORMAL_MODE=0
+SET_BRIGHT_MODE=1
+SET_DIM_MODE=2
+SET_UNDERLINE_MODE=3
+SET_BLINK_MODE=5
+SET_REVERSE_MODE=7
+SET_HIDDEN_MODE=8
+
+SET_FG_COLOR_RED="\\033[$SET_BRIGHT_MODE;31m"
+SET_FG_COLOR_GREEN="\\033[$SET_BRIGHT_MODE;32m"
+SET_FG_COLOR_YELLOW="\\033[$SET_BRIGHT_MODE;33m"
+SET_FG_COLOR_BLUE="\\033[$SET_BRIGHT_MODE;34m"
+SET_FG_COLOR_MAGENTA="\\033[$SET_BRIGHT_MODE;35m"
+SET_FG_COLOR_CYAN="\\033[$SET_BRIGHT_MODE;36m"
+SET_FG_COLOR_WHITE="\\033[$SET_BRIGHT_MODE;37m"
+SET_FG_COLOR_WHITE_WITH_RED_BG="\\033[41m\\033[$SET_BRIGHT_MODE;37m"
+SET_COLOR_NORMAL="\\033[$SET_NORMAL_MODE;39m"
+
+function print_green() {
+    echo -en "${SET_FG_COLOR_GREEN}${1}${SET_COLOR_NORMAL}"
+}
+
+function print_cyan() {
+    echo -en "${SET_FG_COLOR_CYAN}${1}${SET_COLOR_NORMAL}"
+}
+
+function print_error() {
+    echo -en "${SET_FG_COLOR_WHITE_WITH_RED_BG}${1}${SET_COLOR_NORMAL}"
+}
+
+function print_red() {
+    echo -en "${SET_FG_COLOR_RED}${1}${SET_COLOR_NORMAL}"
+}
+
+function print_blue() {
+    echo -en "${SET_FG_COLOR_BLUE}${1}${SET_COLOR_NORMAL}"
+}
+
+function print_yellow() {
+    echo -en "${SET_FG_COLOR_YELLOW}${1}${SET_COLOR_NORMAL}"
+}
+
+function print_white() {
+    echo -en "${SET_FG_COLOR_WHITE}${1}${SET_COLOR_NORMAL}"
+}
+
+function goto() {
+    label=$1
+    if [[ $DEBUG ]]; then
+        echo "label to jump to: $label"
+    fi
+    cmd=$(sed -n "/$label:/{:a;n;p;ba};" $0 | grep -v ':$')
+    if [[ $DEBUG ]]; then
+        echo "cmd: $cmd"
+    fi
+    eval $cmd
+}
+
+function chkgrp() {
+    GROUP=$1
+
+    print_white '* ' && print_cyan "CHECKING FOR GROUP: $GROUP"
+    if ! egrep -q $GROUP /etc/group; then
+        print_red "\t\t\tNOT AVAILABLE" && echo
+        print_white '* ' && print_cyan "CREATING GROUP: $GROUP"
+        groupadd $GROUP
+        if [[ $? = 0 ]]; then
+            print_green "\t\t\tSUCCESSFUL" && echo
+        else
+            print_red "\t\t\tFAILED" && echo
+            exit 1
+        fi
+    else
+        print_green "\t\t\tAVAILABLE" && echo
+    fi
+}
+
+function chkusr() {
+    USER=$1
+    GROUP=$2
+
+    print_white '* ' && print_cyan "CHECKING FOR USER: $USER"
+    if ! egrep -q $USER /etc/passwd; then
+        print_red "\t\t\tNOT AVAILABLE" && echo
+        print_white '* ' && print_cyan "CREATING USER: $USER"
+        useradd -s /bin/bash -g $GROUP -m -k /dev/null $USER
+        if [[ $? = 0 ]]; then
+            print_green "\t\t\tSUCCESSFUL" && echo
+        else
+            print_red "\t\t\tFAILED" && echo
+            exit 1
+        fi
+    else
+        print_green "\t\t\tAVAILABLE" && echo
+    fi
+
+    # create the install directory for our tools in the home directory for the user
+    mkdir -p /home/$USER/bin
+}
+
+function set_passwd() {
+    USER=$1
+    PASSWD="$2"
+
+    print_white '* ' && print_cyan "SETTING PASSWORD FOR USER: $USER"
+    echo "${USER}:${PASSWD}" | chpasswd
+    if [[ "$?" -eq "0" ]]; then
+        print_green "\t\tSUCCESSFUL" && echo
+    else
+        print_red "\t\tFAILED" && echo
+        exit 1
+    fi
+}
+
+function add_user_to_sudoers() {
+    USER=$1
+
+    print_white '* ' && print_cyan "CHECKING IF BUILDTOOLS SUDOERS FILE EXISTS"
+    if [ -f /etc/sudoers.d/buildtools ]; then
+        print_green "\tEXISTS" && echo
+        print_white '* ' && print_cyan "CHECKING IF $USER IS IN SUDOERS FILE"
+        if egrep -q ^$USER /etc/sudoers.d/buildtools; then
+            print_green "\tEXISTS" && echo
+            return
+        else
+            print_yellow "\tNOT PRESENT" && echo
+        fi
+    else
+        touch /etc/sudoers.d/buildtools
+        print_green "\tCREATED" && echo
+    fi
+
+    print_white '* ' && print_cyan "ADDING USER $USER TO SUDOERS FILE"
+    echo "$USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/buildtools
+    print_green "\t\tADDED" && echo
+}
+
+function add_group_to_sudoers() {
+    GROUP=$1
+
+    print_white '* ' && print_cyan "CHECKING IF BUILDTOOLS SUDOERS FILE EXISTS"
+    if [ -f /etc/sudoers.d/buildtools ]; then
+        print_green "\tEXISTS" && echo
+        print_white '* ' && print_cyan "CHECKING IF %${GROUP} IS IN SUDOERS FILE"
+        if egrep -q ^\%${GROUP} /etc/sudoers.d/buildtools; then
+            print_green "\tEXISTS" && echo
+            return
+        else
+            print_yellow "\tNOT PRESENT" && echo
+        fi
+    else
+        touch /etc/sudoers.d/buildtools
+        print_green "\tCREATED" && echo
+    fi
+
+    print_white '* ' && print_cyan "ADDING %${GROUP} TO SUDOERS FILE"
+    echo "%${GROUP} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/buildtools
+    print_green "\t\tADDED" && echo
+}
+
+function setup_environment() {
+    USER=$1
+
+    HOME=/home/$USER
+    TERM=linux
+
+    if [ ! -f $HOME/.bash_profile ]; then
+        print_white '* ' && print_cyan "CREATING BASH PROFILE ENVIRONMENT SETTINGS"
+        cat > /home/$USER/.bash_profile << "EOF"
+exec env -i HOME=$HOME TERM=$TERM PS1='\u:\w\$ ' /bin/bash
+EOF
+        print_green "\tDONE" && echo
+    fi
+
+    if [ ! -f $HOME/.bashrc ]; then
+        print_white '* ' && print_cyan "CREATING BASH CONFIGURATION FILE"
+        cat > $HOME/.bashrc << "EOF"
+test -s ~/.environment && . ~/.environment || true
+test -s ~/.alias && . ~/.alias || true
+EOF
+        print_green "\t\tDONE" && echo
+    fi
+
+    if [ ! -f $HOME/.alias ]; then
+        print_white '* ' && print_cyan "SETTING UP $USER ENVIRONMENT ALIASES"
+        cat > $HOME/.alias << "EOF"
+alias ls="ls -Fa --color=auto"
+alias system_configure="./configure --build=$LFS_TGT --host=$LFS_TGT --target=$LFS_TGT --prefix=/System"
+alias tools_configure="./configure --build=$LFS_TGT --host=$LFS_TGT --target=$LFS_TGT --prefix=/tools"
+alias make_and_check="make && make check"
+alias make_and_test="make && make test"
+alias minstall="sudo make install"
+EOF
+        print_green "\tDONE" && echo
+    fi
+
+    if [ ! -f $HOME/.environment ]; then
+        print_white '* ' && print_cyan "SETTING UP $USER ENVIRONMENT VARIABLES"
+        cat > $HOME/.environment << "EOF"
+set +h
+umask 022
+LFS=/AltimatOS
+LC_ALL=POSIX
+LFS_TGT=$(uname -m)-altimatos-linux-gnu
+PATH=$HOME/bin:/tools/bin:/tools/sbin:/System/bin:/System/sbin
+export LFS LC_ALL LFS_TGT PATH
+EOF
+        print_green "\tDONE" && echo
+    fi
+}
+
+function set_br_permissions() {
+	true
+}
+
+function patch_source() {
+    local patch_file="$1"
+
+    if [ -f $SOURCES/$patch_file ]; then
+        print_cyan "Patching source ($patch_file) ... "
+        REVERSE=""
+        PATCHLVL=""
+        PBACKUP=""
+        VERBOSE=""
+        bk_name=""
+        patch_level=""
+
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                -R) REVERSE=1;;
+                -b) PBACKUP=1 && bk_name=$2;;
+                -p) PATCHLVL=1 && patch_level=$2;;
+                -v) VERBOSE=1;;
+                [9-0]) break;;
+            esac
+            shift
+        done
+
+        FLAGS=""
+        if [ -z $PATCHLVL ]; then
+            FLAGS="Np1"
+        else
+            FLAGS="Np${patch_level}"
+        fi
+        if [ ! -z $REVERSE ]; then
+            FLAGS="$FLAGS -R"
+        fi
+        if [ ! -z $PBACKUP ]; then
+            FLAGS="$FLAGS -b $bk_name"
+        fi
+        if [ -z $VERBOSE ]; then
+            patch -$FLAGS -i $SOURCES/$patch_file > /dev/null
+        else
+            patch -$FLAGS -i $SOURCES/$patch_file
+        fi
+        retval=$?
+        if [ $retval -eq 0 ]; then
+            print_green "OK" && echo
+        else
+            print_red "FAILED!" && echo
+            print_error "ERROR: $SOURCES/$patch_file: cannot patch sources. Try applying manually to determine problem." && echo
+            exit $retval
+        fi
+    else
+        echo
+        print_error "ERROR: $SOURCES/$patch_file: file not found." && echo
+        exit -1
+    fi
+}
+
+function get_metadata_variable() {
+    local KEY=$1
+    grep $KEY $_PACKAGE_METADATA_TMPFILE | awk -e '{print $2}'
+}
+
+function begin() {
+    local DIR=$1
+    pushd $DIR > /dev/null
+}
+
+function begin_prep {
+    BUILD_STAGE="prep"
+
+    # retrieve various variables that all packages need from the package metadata
+    PKGNAME="$(get_metadata_variable '^Name:')"
+    VERSION="$(get_metadata_variable Version:)"
+    BUILDNUM="$(get_metadata_variable Build:)"
+    _t_file="$(get_metadata_variable Source:)"
+    SRCFILE=$(eval echo $_t_file)
+    BUILDROOT="$TMP/$PKGNAME-$VERSION-$BUILDNUM"
+    if [[ -z $SRCDIR ]]; then
+        SRCDIR=$PKGNAME-$VERSION
+    fi
+
+    print_white "Building $PKGNAME version $VERSION-$BUILDNUM..."
+    echo
+    echo
+
+    print_white "PHASE: Prepare" && echo
+    begin $SOURCES
+    clean $BUILDDIR/$SRCDIR
+    clean $BUILDROOT
+}
+
+function begin_configure {
+    BUILD_STAGE="configure"
+
+    echo
+    print_white "PHASE: Configure" && echo
+    # retrieve various variables that all packages need from the package metadata
+    PKGNAME="$(get_metadata_variable '^Name:')"
+    VERSION="$(get_metadata_variable Version:)"
+    BUILDNUM="$(get_metadata_variable Build:)"
+    SRCFILE="$(get_metadata_variable Source:)"
+    BUILDROOT="$TMP/$PKGNAME-$VERSION-$BUILDNUM"
+    if [[ -z $SRCDIR ]]; then
+        SRCDIR=$PKGNAME-$VERSION
+    fi
+
+    begin $BUILDDIR/$SRCDIR
+    print_cyan "Configuring $PKGNAME $VERSION-$BUILDNUM for compilation" && echo
+}
+
+function begin_build {
+    BUILD_STAGE="build"
+
+    echo
+    print_white "PHASE: Compile" && echo
+    # retrieve various variables that all packages need from the package metadata
+    PKGNAME="$(get_metadata_variable '^Name:')"
+    VERSION="$(get_metadata_variable Version:)"
+    BUILDNUM="$(get_metadata_variable Build:)"
+    SRCFILE="$(get_metadata_variable Source:)"
+    BUILDROOT="$TMP/$PKGNAME-$VERSION-$BUILDNUM"
+    if [[ -z $SRCDIR ]]; then
+        SRCDIR=$PKGNAME-$VERSION
+    fi
+
+    begin $BUILDDIR/$SRCDIR
+    print_cyan "Building $PKGNAME $VERSION-$BUILDNUM. Please wait... " && echo
+}
+
+function begin_check {
+    BUILD_STAGE="check"
+
+    echo
+    print_white "PHASE: Validate" && echo
+    # retrieve various variables that all packages need from the package metadata
+    PKGNAME="$(get_metadata_variable '^Name:')"
+    VERSION="$(get_metadata_variable Version:)"
+    BUILDNUM="$(get_metadata_variable Build:)"
+    SRCFILE="$(get_metadata_variable Source:)"
+    BUILDROOT="$TMP/$PKGNAME-$VERSION-$BUILDNUM"
+    if [[ -z $SRCDIR ]]; then
+        SRCDIR=$PKGNAME-$VERSION
+    fi
+
+    begin $BUILDDIR/$SRCDIR
+    print_cyan "Running software test suite for $PKGNAME $VERSION-$BUILDNUM to check "
+    print_cyan "correctness of build. Please wait... " && echo
+}
+
+function begin_install {
+    BUILD_STAGE="install"
+
+    echo
+    print_white "PHASE: Install" && echo
+    # retrieve various variables that all packages need from the package metadata
+    PKGNAME="$(get_metadata_variable '^Name:')"
+    VERSION="$(get_metadata_variable Version:)"
+    BUILDNUM="$(get_metadata_variable Build:)"
+    SRCFILE="$(get_metadata_variable Source:)"
+    BUILDROOT="$TMP/$PKGNAME-$VERSION-$BUILDNUM"
+    if [[ -z $SRCDIR ]]; then
+        SRCDIR=$PKGNAME-$VERSION
+    fi
+
+    begin $BUILDDIR/$SRCDIR
+    if [[ ! -d $BUILDROOT ]]; then
+        mkdir -p $BUILDROOT
+    fi
+    print_cyan "Installing $PKGNAME $VERSION-$BUILDNUM into fake root." && echo
+}
+
+function post_package_generation_cleanup {
+    # retrieve various variables that all packages need from the package metadata
+    PKGNAME="$(get_metadata_variable Name:)"
+    VERSION="$(get_metadata_variable Version:)"
+    BUILDNUM="$(get_metadata_variable Build:)"
+    SRCFILE="$(get_metadata_variable Source:)"
+    BUILDROOT="$TMP/$PKGNAME-$VERSION-$BUILDNUM"
+
+    clean $BUILDDIR/$SRCDIR
+}
+
+function generate_binary_package {
+    post_package_generation_cleanup
+}
+
+function end() {
+    retval=$?
+
+    declare -A phases
+    phases=([prep]=1 [configure]=2 [build]=3 [check]=4 [install]=5 [gen_binary_pkg]=6 [gen_source_pkg]=7 [all]=8)
+
+    if [[ "$BUILD_STAGE" == "prep" ]]; then
+        if [[ $retval -eq 0 ]]; then
+            print_green "Preparing build for $PKGNAME $VERSION-$BUILDNUM completed successfully!" && echo
+        else
+            print_red "Preparing build for $PKGNAME $VERSION-$BUILDNUM failed!" && echo
+            print_red "Refer to the prep output for more information. ERROR CODE: $retval" && echo
+        fi
+    fi
+    if [[ "$BUILD_STAGE" == "configure" ]]; then
+        if [[ $retval -eq 0 ]]; then
+            print_green "Configuring build for $PKGNAME $VERSION-$BUILDNUM completed successfully!" && echo
+        else
+            print_red "Configuring build for $PKGNAME $VERSION-$BUILDNUM failed!" && echo
+            print_red "Refer to the software configure log for more information. ERROR CODE: $retval" && echo
+        fi
+    fi
+    if [[ "$BUILD_STAGE" == "build" ]]; then
+        if [[ $retval -eq 0 ]]; then
+            print_green "Building $PKGNAME $VERSION-$BUILDNUM completed successfully!" && echo
+        else
+            print_red "Building $PKGNAME $VERSION-$BUILDNUM failed!" && echo
+            print_red "Refer to the build output for more information. ERROR CODE: $retval" && echo
+            exit
+        fi
+    fi
+    if [[ "$BUILD_STAGE" == "check" ]]; then
+        if [[ $retval -eq 0 ]]; then
+            print_green "Software test suite for $PKGNAME $VERSION-$BUILDNUM completed without errors!" && echo
+        else
+            print_red "Software test suite for $PKGNAME $VERSION-$BUILDNUM had errors!" && echo
+            print_red "Please review the software's test logs for more information. ERROR CODE: $retval" && echo
+            exit
+        fi
+    fi
+    if [[ "$BUILD_STAGE" == "install" ]]; then
+        if [[ $retval -eq 0 ]]; then
+            print_green "Install of $PKGNAME $VERSION-$BUILDNUM into fake root completed successfully!" && echo
+        else
+            print_red "Install of $PKGNAME $VERSION-$BUILDNUM into fake root failed!" && echo
+            print_red "Please review the install output for more information. ERROR CODE: $retval" && echo
+            exit
+        fi
+    fi
+
+    popd > /dev/null
+    # logic for building up to a specific phase.
+    if [[ ${phases[$PHASE]} -eq ${phases[$BUILD_STAGE]} ]]; then
+        exit
+    fi
+}
+
+function clean() {
+    local target=$1
+
+    if [[ -d $target ]]; then
+        print_cyan "Removing $target... "
+        rm -rf $target
+        retval=$?
+        if [[ $retval -eq 0 ]]; then
+            print_green "OK" && echo
+        else
+            print_red "FAILED!" && echo
+            print_error "ERROR: could not remove directory: $retval" && echo
+            exit $retval
+        fi
+    else
+        print_yellow "$target: directory not found, continuing anyway... " && echo
+    fi
+}
+
+function unpack() {
+    local target=$1
+
+    if [[ ! -d $BUILDDIR ]]; then
+        mkdir -p $BUILDDIR
+    fi
+    if [ -f $SOURCES/$target ]; then
+        print_cyan "Unpacking sources... ($target) "
+        tar xf $SOURCES/$target -C $BUILDDIR/
+        retval=$?
+        if [[ $retval -eq 0 ]]; then
+            print_green "OK" && echo
+        else
+            print_red "FAILED!" && echo
+            print_error "ERROR: could not unpack $target: $retval" && echo
+            exit $retval
+        fi
+    else
+        print_error "ERROR: $target: file not found" && echo
+        exit -1
+    fi
+}
+
+function register_install() {
+    local pkg_name=$1
+    local pkg_version=$3
+    local pkg_build=$4
+    local pkg_epoch=$2
+
+    # validate package name, version, and build are present
+    if [[ -z $pkg_name ]]; then
+        print_error "ERROR: Syntax error: register_install must have the following variables defined:" && echo
+        echo
+        print_white "register_install <PACKAGE NAME> <PACKAGE VERSION> <PACKAGE BUILD> [<PACKAGE EPOCH>]" && echo
+        exit 1
+    fi
+    if [[ -z $pkg_version ]]; then
+        print_error "ERROR: Syntax error: register_install must have the following variables defined:" && echo
+        echo
+        print_white "register_install <PACKAGE NAME> <PACKAGE VERSION> <PACKAGE BUILD> [<PACKAGE EPOCH>]" && echo
+        exit 1
+    fi
+    if [[ -z $pkg_build ]]; then
+        print_error "ERROR: Syntax error: register_install must have the following variables defined:" && echo
+        echo
+        print_white "register_install <PACKAGE NAME> <PACKAGE VERSION> <PACKAGE BUILD> [<PACKAGE EPOCH>]" && echo
+        exit 1
+    fi
+    # if epoch is not defined in the package, assume we mean epoch 0
+    if [[ -z $pkg_epoch ]]; then
+        $pkg_epoch=0
+    fi
+
+    # check whether the package registry is present
+    if [[ -f $DB_DIR/pkg-registry.txtdb ]]; then
+        true
+    else
+        print_cyan "Creating package registry... "
+        mkdir -p $DB_DIR
+        touch $DB_DIR/pkg-registry.txtdb
+        if [[ $? -eq 0 ]]; then
+            print_green "OK" && echo
+        else
+            print_red "FAILED" && echo
+            print_error "ERROR: Unable to create package registry! "
+            print_error "Check that permissions on $DB_DIR are OK, "
+            print_error "and that the system has adequate space on "
+            print_error "disk." && echo
+            exit 1
+        fi
+    fi
+    print_cyan "Registering installation... "
+
+    # first determine if package is already registered (in the case with re-installs)
+    if grep "$pkg_name:$pkg_version:$pkg_build:$pkg_epoch" $DB_DIR/pkg-registry.txtdb 2>&1 > /dev/null; then
+        print_green "OK"
+        return 0
+    else
+        # write package entry to the registry
+        echo -ne "$pkg_name:$pkg_version:$pkg_build:$pkg_epoch\n" >> $DB_DIR/pkg-registry.txtdb
+        retval=$?
+        if [[ $retval -eq 0 ]]; then
+            print_green "OK" && echo
+        else
+            print_red "FAILED" && echo
+            print_error "ERROR: cannot write package registration. error code $retval" && echo
+            exit 1
+        fi
+    fi
+}
+
+function build_dep() {
+    print_cyan "Checking build dependencies... "
+
+    local FILE_TYPE=
+    local PKG_TYPE=
+    local CAP_TYPE=
+    local LESS_THAN=
+    local EQUALS=
+    local GREATERTHAN=
+    local EXISTS=
+    local NOT_EXISTS=
+    local VERBOSE=
+    local pkg_name=""
+    local cap_name=""
+    local file_name=""
+    local version_str=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -f) FILE_TYPE=1    && file_name=$2;;
+            -p) PKG_TYPE=1     && pkg_name=$2;;
+            -c) CAP_TYPE=1     && cap_name=$2;;
+            -l) LESS_THAN=1    && version_str=$2;;
+            -e) EQUALS=1       && version_str=$2;;
+            -g) GREATER_THAN=1 && version_str=$2;;
+            -x) EXISTS=1;;
+            -n) NOT_EXISTS=1;;
+            *) break;;
+        esac
+        shift
+    done
+
+    FLAGS=""
+    if [[ $FILE_TYPE == 1 ]]; then
+        if [[ ! -z $file_name ]]; then
+            if [[ -f $file_name ]]; then
+                print_green "OK" && echo
+                return 0
+            else
+                print_red "UNMET FILE DEPENDENCY" && echo
+                print_error "ERROR: Build dependency on file $file_name: not present. Exiting." && echo
+                exit 1
+            fi
+        else
+            print_red "SYNTAX ERROR" && echo
+            print_error "ERROR: Syntax error: File type dependencies must have a file to check for." && echo
+            exit 1
+        fi
+    fi
+    if [[ $PKG_TYPE == 1 ]]; then
+        # first, check if package is in database
+        if grep "$pkg_name" $DB_DIR/pkg-registry.txtdb 2>&1 > /dev/null; then
+            # OK, it's present. Now, did we get a package version handed to us?
+            if [[ ! -z $version_str ]]; then
+                # Yes.
+                # Lets pull a copy of the record from the DB, and then
+                # put it in to variables we can test against.
+                pkg_record=$(grep "$pkg_name" $DB_DIR/pkg-registry.txtdb)
+                _pkg_version=$(echo $pkg_record | cut -d ":" -f2)
+                _pkg_build=$(echo $pkg_record | cut -d ":" -f3)
+                _pkg_epoch=$(echo $pkg_record | cut -d ":" -f4)
+
+                # build a "human readable" version string for comparisons
+                _version_str="$pkg_epoch:$pkg_version-$pkg_build"
+
+                # NOTE: version strings are tricky, since they include a package's
+                # version, build, and sometimes epoch. If the package has no epoch,
+                # we assume that it is zero. So to check the DB, we first see if the
+                # version string handed to us has one.
+                #
+                # Version strings are in the following format: <[EPOCH]>:[VERSION]-[BUILD],
+                # where the epoch and subsequent colon might not be present.
+                if echo $version_str | cut -d ":" -f 1 2>&1 > /dev/null ; then
+                    # doesn't contain an epoch
+                    # check if DBs epoch is zero for this package
+                    if [[ $_pkg_epoch -ne 0 ]]; then
+                        print_red "FAILED" && echo
+                        print_error "ERROR: Required build dependency on package $pkg_name: wrong version. Exiting." && echo
+                        exit 1
+                    fi
+                else
+                    # contains an epoch
+                    _epoch=$(echo $version_str | cut -d ":" -f 1)
+                    # is it greater than or equal to the epoch from the DB?
+                    if [[ $_epoch -ge $_pkg_epoch ]]; then
+                        return 0
+                    fi
+                fi
+#                if [[ $LESS_THAN == 1 && ! -z $version_str ]]; then
+#                else
+#                fi
+#                if [[ $EQUALS == 1 && ! -z $version_str ]]; then
+#                else
+#                fi
+#                if [[ $GREATER_THAN == 1 && ! -z $version_str ]]; then
+#                else
+#                fi
+#                if [[ $EXISTS == 1 ]]; then
+#                else
+#                fi
+#                if [[ $NOT_EXISTS == 1 ]]; then
+#                else
+#                fi
+            else
+                # No, we didn't get a package version passed to us.
+                # Just return success
+                print_green "OK" && echo
+                return 0
+            fi
+        else
+            print_red "PACKAGE NOT INSTALLED" && echo
+            print_error "ERROR: Required build dependency on package $pkg_name: not installed. Exiting." && echo
+            exit 1
+        fi
+    fi
+}
+
+function Configure {
+    # check for the configure script
+    if [[ -f ./configure ]]; then
+        CONFIGURATION_SCRIPT="./configure"
+    else
+        print_error "ERROR: Configure script missing! Do you need to run autoconf and friends?" && echo
+        exit 1
+    fi
+
+    while test $# -gt 0; do
+        FLAG=$(echo $1 | cut -f1 -d "=")
+        VALUE=$(echo $1 | cut -f2 -d "=")
+        case $FLAG in
+            --host)           HOST_TARGET=$VALUE;;
+            --build)          BUILD_TARGET=$VALUE;;
+            --program-prefix) PROG_PREFIX=$VALUE;;
+            --prefix)         PREFIX=$VALUE;;
+            --exec-prefix)    EXEC_PREFIX=$VALUE;;
+            --bindir)         BIN_DIR=$VALUE;;
+            --sbindir)        SBIN_DIR=$VALUE;;
+            --sysconfdir)     SYS_CONF_DIR=$VALUE;;
+            --datadir)        DATA_DIR=$VALUE;;
+            --includedir)     INCLUDE_DIR=$VALUE;;
+            --libdir)         LIB_DIR=$VALUE;;
+            --libexecdir)     LIB_EXEC_DIR=$VALUE;;
+            --localstatedir)  LOCAL_STATE_DIR=$VALUE;;
+            --sharedstatedir) SHARED_STATE_DIR=$VALUE;;
+            --mandir)         MAN_DIR=$VALUE;;
+            --infodir)        INFO_DIR=$VALUE;;
+        esac
+        shift
+    done     
+
+    HOST_FLAGS="--host=$HOST_TARGET"
+    BUILD_FLAGS="--build=$BUILD_TARGET"
+
+    print_cyan "Configuring $PKGNAME for compilation..." && echo
+    $CONFIGURATION_SCRIPT $HOST_FLAGS $BUILD_FLAGS \
+        --program-prefix=$PROG_PREFIX \
+        --prefix=$PREFIX \
+        --exec-prefix=$EXEC_PREFIX \
+        --bindir=$BIN_DIR \
+        --sbindir=$SBIN_DIR \
+        --sysconfdir=$SYS_CONF_DIR \
+        --datadir=$DATA_DIR \
+        --includedir=$INCLUDE_DIR \
+        --libdir=$LIB_DIR \
+        --libexecdir=$LIB_EXEC_DIR \
+        --localstatedir=$LOCAL_STATE_DIR \
+        --sharedstatedir=$SHARED_STATE_DIR \
+        --mandir=$MAN_DIR \
+        --infodir=$INFO_DIR \
+        $@
+    exit
+}
+

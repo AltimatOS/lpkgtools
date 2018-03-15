@@ -1,0 +1,26 @@
+# needed for chroot builds
+CHROOT=/AltimatOS
+TOOLSROOT=$CHROOT/tools
+SRCSROOT=$CHROOT/sources
+BUILDUSER=builder
+BUILDGROUP=builders
+
+# needed for registering software
+ROOT=/
+DB_DIR=$ROOT/System/var/db/pkgs
+
+# needed for pkgbuilder
+TARGET_ROOT=/
+if [[ -f $HOME/.apbrc ]]; then
+    . $HOME/.apbrc
+else
+    PKGROOT=/tools/src/pkg
+fi
+BUILDDIR=$PKGROOT/build
+SOURCES=$PKGROOT/sources
+SPECS=$PKGROOT/blueprints
+TMP=$PKGROOT/temp
+SPKGS=$PKGROOT/apb/apbs
+PKGS=$PKGROOT/apb/apbp
+METAPKGS=$PKGROOT/apb/apbm
+CONTAINERPKGS=$PKGROOT/apb/apbc
